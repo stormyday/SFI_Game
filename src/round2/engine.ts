@@ -89,7 +89,6 @@ export function createGame(names: string[], random = Math.random): GameState {
     phase: 'planning',
     players,
     plans: Object.fromEntries(players.map((player) => [player.id, emptyPlan(player)])),
-    locked: [],
     activePlayerIndex: 0,
     votePlayerIds: [],
     votes: {},
@@ -102,7 +101,7 @@ export function createGame(names: string[], random = Math.random): GameState {
 
 export function updatePlan(state: GameState, playerId: string, patch: Partial<TurnPlan>): GameState {
   const next = clone(state)
-  if (!['planning', 'confirming'].includes(next.phase) || next.locked.includes(playerId)) return next
+  if (next.phase !== 'planning' || next.players[next.activePlayerIndex].id !== playerId) return next
   const player = next.players.find((entry) => entry.id === playerId)!
   const updated = { ...next.plans[playerId], ...patch }
   if (player.coop || updated.joinCoop || !player.harvest) updated.saleTier = null
@@ -117,9 +116,18 @@ export function updatePlan(state: GameState, playerId: string, patch: Partial<Tu
 export function advancePlanning(state: GameState): GameState {
   const next = clone(state)
   if (next.phase !== 'planning') return next
-  if (next.activePlayerIndex < next.players.length - 1) next.activePlayerIndex += 1
-  else { next.phase = 'confirming'; next.activePlayerIndex = 0 }
-  return next
+  const player = next.players[next.activePlayerIndex]
+  validatePlan(player, next.plans[player.id], next.round)
+  if (next.activePlayerIndex < next.players.length - 1) {
+    next.activePlayerIndex += 1
+    return next
+  }
+  applyPlans(next)
+  next.votePlayerIds = next.players.filter((entry) => entry.coop).map((entry) => entry.id)
+  next.votes = Object.fromEntries(next.votePlayerIds.map((id) => [id, 'standard']))
+  next.activePlayerIndex = 0
+  next.phase = next.votePlayerIds.length ? 'voting' : 'resolution'
+  return next.votePlayerIds.length ? next : resolveCurrentRound(next)
 }
 
 function validatePlan(player: Player, plan: TurnPlan, round: number): void {
@@ -158,19 +166,6 @@ function applyPlans(next: GameState): void {
     player.growingHarvest = forecastHarvest(player, plan, next.round)
     player.land = previewLandPlots(player, plan)
   }
-}
-
-export function advanceConfirming(state: GameState): GameState {
-  const next = clone(state)
-  if (next.phase !== 'confirming') return next
-  next.locked.push(next.players[next.activePlayerIndex].id)
-  if (next.activePlayerIndex < next.players.length - 1) { next.activePlayerIndex += 1; return next }
-  applyPlans(next)
-  next.votePlayerIds = next.players.filter((player) => player.coop).map((player) => player.id)
-  next.votes = Object.fromEntries(next.votePlayerIds.map((id) => [id, 'standard']))
-  next.activePlayerIndex = 0
-  next.phase = next.votePlayerIds.length ? 'voting' : 'resolution'
-  return next.votePlayerIds.length ? next : resolveCurrentRound(next)
 }
 
 export function updateVote(state: GameState, playerId: string, tier: Tier): GameState {
@@ -365,7 +360,7 @@ export function resolveCurrentRound(state: GameState): GameState {
     crisisImpact: impact,
     markets,
     lines: next.players.map((player) => lines[player.id]),
-    note: !saleRound ? 'Round 1 prepares the first harvest. There is no inventory to price or sell yet.' : shock === 'marketClosure' ? 'Market closure: only due institutional contracts could sell this round.' : 'Demand was revealed after all prices were locked. Lower-priced offers served eligible buyers first.',
+    note: !saleRound ? 'Round 1 prepares the first harvest. There is no inventory to price or sell yet.' : shock === 'marketClosure' ? 'Market closure: only due institutional contracts could sell this round.' : 'Demand was revealed after every farmer finished planning. Lower-priced offers served eligible buyers first.',
   }
   return next
 }
@@ -384,11 +379,10 @@ export function advanceRound(state: GameState): GameState {
   next.phase = 'planning'
   next.activePlayerIndex = 0
   next.plans = Object.fromEntries(next.players.map((player) => [player.id, emptyPlan(player)]))
-  next.locked = []
   next.votePlayerIds = []
   next.votes = {}
   next.resolution = null
   return next
 }
 
-export const phaseLabel = (phase: GameState['phase']): string => ({ planning: 'Visible planning', confirming: 'Lock plans', voting: 'Co-op vote', resolution: 'Market resolution', debrief: 'Debrief' })[phase]
+export const phaseLabel = (phase: GameState['phase']): string => ({ planning: 'Planning', voting: 'Co-op vote', resolution: 'Market resolution', debrief: 'Debrief' })[phase]

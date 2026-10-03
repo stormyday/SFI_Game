@@ -8,7 +8,7 @@ export type Mode = typeof MODES[number]
 export type Source = typeof SOURCES[number]
 export type Role = typeof ROLES[number]
 export type FarmStatus = 'conventional' | 'converting' | 'organic'
-export type Phase = 'planning' | 'confirming' | 'voting' | 'resolution' | 'debrief'
+export type Phase = 'planning' | 'voting' | 'resolution' | 'debrief'
 export type ShockType = 'flood' | 'marketClosure' | 'tourismCollapse'
 export type PlotState = 'growing-conventional' | 'growing-organic' | 'converting' | 'crisis-affected' | 'empty'
 export type TierValues = Record<Tier, number>
@@ -122,7 +122,6 @@ export interface GameState {
   phase: Phase
   players: Player[]
   plans: Record<string, TurnPlan>
-  locked: string[]
   activePlayerIndex: number
   votePlayerIds: string[]
   votes: Record<string, Tier>

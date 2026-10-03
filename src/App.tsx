@@ -1,10 +1,11 @@
-import { useMemo, useState } from 'react'
+import { useEffect, useMemo, useState } from 'react'
 import { ROUND2_CONFIG } from './round2/config'
-import { advanceConfirming, advancePlanning, advanceRound, advanceVoting, combinedDemand, conversionRoundsLeft, createGame, farmOperatingCost, forecastHarvest, phaseLabel, previewLandPlots, roleInstruction, rolePassed, updatePlan, updateVote, winningCoopTier } from './round2/engine'
+import { advancePlanning, advanceRound, advanceVoting, combinedDemand, conversionRoundsLeft, createGame, farmOperatingCost, forecastHarvest, phaseLabel, previewLandPlots, roleInstruction, rolePassed, updatePlan, updateVote, winningCoopTier } from './round2/engine'
 import { GameState, MarketSnapshot, Player, Tier, TIERS } from './round2/types'
 
 const title = (value: string) => value.replace(/([A-Z])/g, ' $1').replace(/^./, (letter) => letter.toUpperCase())
 const money = (value: number) => `$${value.toFixed(2)}`
+const signedMoney = (value: number) => `${value < 0 ? '−' : '+'}${money(Math.abs(value))}`
 const units = (value: number) => `${value.toFixed(value % 1 ? 2 : 0)} units`
 
 const statusLabel = (player: Player, round: number) => {
@@ -19,15 +20,19 @@ function App() {
 
   const activePlayer = useMemo(() => {
     if (!game) return null
-    if (game.phase === 'planning' || game.phase === 'confirming') return game.players[game.activePlayerIndex]
+    if (game.phase === 'planning') return game.players[game.activePlayerIndex]
     if (game.phase === 'voting') return game.players.find((player) => player.id === game.votePlayerIds[game.activePlayerIndex]) ?? null
     return null
   }, [game])
 
+  useEffect(() => {
+    if (game) document.getElementById('screen-heading')?.focus()
+  }, [game?.round, game?.phase, game?.activePlayerIndex])
+
   const transition = (action: (state: GameState) => GameState) => {
     try {
+      if (game) setGame(action(game))
       setError(null)
-      setGame((state) => state ? action(state) : state)
     } catch (caught) {
       setError(caught instanceof Error ? caught.message : 'That action could not be completed.')
     }
@@ -38,90 +43,122 @@ function App() {
   const plan = activePlayer ? game.plans[activePlayer.id] : null
   return <main className="round-two-shell">
     <header className="r2-header">
-      <div><p className="eyebrow">Round 2 mechanics prototype · shared screen</p><h1>Food Resilience Market</h1></div>
+      <div><p className="eyebrow">Five farmers · one shared screen</p><h1>Food Resilience Market</h1></div>
       <div className="phase-pill"><strong>Round {game.round} / {ROUND2_CONFIG.rounds}</strong><span>{phaseLabel(game.phase)}</span></div>
-      <button className="quiet" onClick={() => { setGame(null); setError(null) }}>New game</button>
+      <button className="quiet" onClick={() => { if (window.confirm('Start a new game? Current progress will be lost.')) { setGame(null); setError(null) } }}>New game</button>
     </header>
 
-    <section className="phase-guide" aria-label="Round sequence"><span className={game.phase === 'planning' ? 'current' : ''}>1. Plan</span><span className={game.phase === 'confirming' ? 'current' : ''}>2. Lock</span><span className={game.phase === 'voting' ? 'current' : ''}>3. Co-op vote</span><span className={game.phase === 'resolution' ? 'current' : ''}>4. Reveal & sell</span></section>
+    <PhaseGuide game={game} />
+    {activePlayer && <TurnProgress game={game} />}
     {error && <p className="error" role="alert">{error}</p>}
 
-    {(game.phase === 'planning' || game.phase === 'confirming') && activePlayer && plan && <PlanningWorkspace game={game} player={activePlayer} onChange={(patch) => transition((state) => updatePlan(state, activePlayer.id, patch))} onAdvance={() => transition(game.phase === 'planning' ? advancePlanning : advanceConfirming)} />}
+    {game.phase === 'planning' && activePlayer && plan && <PlanningWorkspace game={game} player={activePlayer} onChange={(patch) => transition((state) => updatePlan(state, activePlayer.id, patch))} onAdvance={() => transition(advancePlanning)} />}
     {game.phase === 'voting' && activePlayer && <VoteWorkspace game={game} player={activePlayer} onVote={(tier) => transition((state) => updateVote(state, activePlayer.id, tier))} onAdvance={() => transition(advanceVoting)} />}
     {game.phase === 'resolution' && game.resolution && <Resolution game={game} onNext={() => transition(advanceRound)} />}
     {game.phase === 'debrief' && <Debrief game={game} />}
 
-    {(game.phase === 'planning' || game.phase === 'confirming' || game.phase === 'voting') && <MarketPreview game={game} />}
-    <PlayerRail game={game} activeId={activePlayer?.id ?? null} />
+    {(game.phase === 'planning' || game.phase === 'voting') && <MarketPreview game={game} />}
+    {game.phase !== 'debrief' && <PlayerRail game={game} activeId={activePlayer?.id ?? null} />}
   </main>
+}
+
+function PhaseGuide({ game }: { game: GameState }) {
+  const phases: { key: GameState['phase']; label: string }[] = [
+    { key: 'planning', label: 'Plan' }, { key: 'voting', label: 'Co-op vote' },
+    { key: 'resolution', label: 'Reveal sales' },
+    { key: 'debrief', label: 'Debrief' },
+  ]
+  const current = phases.findIndex((step) => step.key === game.phase)
+  return <section className="phase-guide" aria-label="Round sequence">{phases.map((step, index) => {
+    const skipped = step.key === 'voting' && index < current && game.votePlayerIds.length === 0
+    return <span key={step.key} className={index === current ? 'current' : skipped ? 'skipped' : index < current ? 'complete' : ''} aria-current={index === current ? 'step' : undefined}>{skipped ? '— ' : index < current ? '✓ ' : `${index + 1}. `}{skipped ? 'No co-op vote' : step.label}</span>
+  })}</section>
+}
+
+function TurnProgress({ game }: { game: GameState }) {
+  const players = game.phase === 'voting' ? game.votePlayerIds.map((id) => game.players.find((player) => player.id === id)!) : game.players
+  const label = game.phase === 'planning' ? 'Planning' : 'Co-op vote'
+  return <section className="turn-progress" aria-label={`${label} progress`}>
+    <strong>{label} · Player {game.activePlayerIndex + 1} of {players.length}</strong>
+    <div className="turn-steps" style={{ gridTemplateColumns: `repeat(${players.length}, minmax(95px, 1fr))` }}>{players.map((player, index) => <span key={player.id} className={index === game.activePlayerIndex ? 'current' : index < game.activePlayerIndex ? 'complete' : ''} aria-current={index === game.activePlayerIndex ? 'step' : undefined}>{index < game.activePlayerIndex ? '✓ ' : ''}{player.name}</span>)}</div>
+  </section>
 }
 
 function Setup({ names, setNames, start }: { names: string[]; setNames: (names: string[]) => void; start: () => void }) {
   return <main className="setup-shell"><section className="setup-panel">
-    <p className="eyebrow">Single crop · two markets · five players</p><h1>Food Resilience Market</h1>
-    <p className="lead">A plain shared-screen simulation. The meaningful choices are conversion, co-op membership, contracts, and pricing the harvest already available to sell.</p>
+    <p className="eyebrow">Five players · five rounds · one shared screen</p><h1>Food Resilience Market</h1>
+    <p className="lead">Take turns running a farm. Choose how to grow, set prices when harvest is ready, and see how the market responds. Each farmer receives a public goal.</p>
+    <div className="how-it-works"><strong>Each round</strong><ol><li>Each farmer takes one turn to choose a farm path and price any harvest.</li><li>Co-op members vote on a shared sale price.</li><li>Demand is revealed and everyone sees what sold.</li></ol></div>
+    <h2>Who is playing?</h2>
     <div className="name-grid">{names.map((name, index) => <label key={index}>Player {index + 1}<input value={name} onChange={(event) => setNames(names.map((entry, itemIndex) => itemIndex === index ? event.target.value : entry))} /></label>)}</div>
-    <div className="rule-list"><span>Each usable plot grows one crop automatically.</span><span>Organic conversion blocks base land for one round; farms cost $2 normally or $6 with organic land ready.</span><span>Co-op adds one immediate organic plot, contracts, and a shared price vote.</span></div>
-    <button className="primary" onClick={start}>Start five-round game</button>
+    <button className="primary" onClick={start}>Start game</button>
   </section></main>
 }
 
 function PlanningWorkspace({ game, player, onChange, onAdvance }: { game: GameState; player: Player; onChange: (patch: Partial<GameState['plans'][string]>) => void; onAdvance: () => void }) {
   const plan = game.plans[player.id]
-  const saleDisabled = !player.harvest || player.coop || plan.joinCoop
-  const conversionPlanned = player.farmStatus === 'conventional' && (plan.startConversion || plan.joinCoop)
   const forecast = forecastHarvest(player, plan, game.round)
   const previewLand = previewLandPlots(player, plan)
-  const titleText = game.phase === 'planning' ? `Planning: ${player.name}` : `Lock plan: ${player.name}`
-  return <section className="workspace"><div className="workspace-heading"><div><p className="eyebrow">{game.phase === 'planning' ? 'Visible first pass' : 'Visible final pass'}</p><h2>{titleText}</h2><p>{game.phase === 'planning' ? 'Set a sale price for current inventory before demand is revealed, then decide the farm’s next-round status.' : 'Review the visible choices, then lock this farmer’s final plan.'}</p></div><div className="goal-box"><strong>{player.role}</strong><span>{roleInstruction(player.role)}</span></div></div>
-    <div className="workspace-grid">
-      <section className={`action-card ${saleDisabled ? 'disabled-card' : ''}`}><p className="card-kicker">A. Current harvest for sale</p><h3>Price this round’s inventory</h3>
-        {player.harvest ? <><HarvestGrid player={player} plan={plan} />
-          <p className="contract-note">Operating cost this round: <strong>{money(farmOperatingCost(player))}</strong> · {player.coop || player.farmStatus === 'organic' ? 'organic land is ready' : 'no organic land is ready yet'}</p>
-          <label>Personal sale tier<select disabled={saleDisabled} value={plan.saleTier ?? ''} onChange={(event) => onChange({ saleTier: event.target.value as Tier })}><option value="">Choose a tier</option>{TIERS.map((tier) => <option key={tier} value={tier}>{title(tier)} · {money(ROUND2_CONFIG.prices[player.harvest!.mode][tier])}/unit</option>)}</select></label>
-          {player.coop || plan.joinCoop ? <p className="disabled-message">Personal pricing is disabled: co-op output uses the shared tier chosen in the co-op vote.</p> : <p className="hint">Demand is hidden until every farmer locks a price.</p>}</> : <><p className="disabled-message">No crop is available for sale this round. Price controls are disabled.</p><p className="contract-note">Operating cost this round: <strong>{money(farmOperatingCost(player))}</strong></p></>}
-      </section>
-      <section className="action-card"><p className="card-kicker">B. Next-round growing</p><h3>Land and conversion</h3>
+  const choice = plan.joinCoop ? 'coop' : plan.startConversion ? 'convert' : 'keep'
+  const nextPlayer = game.players[game.activePlayerIndex + 1]
+  const willVote = game.players.some((entry) => entry.coop || game.plans[entry.id].joinCoop)
+  const nextStep = nextPlayer ? `Next: ${nextPlayer.name}` : willVote ? 'Next: co-op vote' : 'Next: market results'
+  return <section className="workspace" aria-labelledby="screen-heading">
+    <div className="workspace-heading"><p className="eyebrow">Your turn</p><h2 id="screen-heading" tabIndex={-1}>{player.name}, make your choices</h2><p>Your choices are final when you finish this turn. Demand stays hidden until every farmer has played.</p></div>
+    <div className="workspace-grid"><div className="decision-flow">
+      {player.harvest ? <section className="action-card"><p className="card-kicker">1 · Harvest ready now</p><h3>Set this round’s sale price</h3><HarvestGrid player={player} round={game.round} />
+        {player.coop || plan.joinCoop ? <p className="decision-note">The co-op will vote on a shared price tier after every farmer finishes their turn.</p> : <><label className="field">Your sale price<select value={plan.saleTier ?? ''} onChange={(event) => onChange({ saleTier: event.target.value as Tier })}><option value="">Choose a tier</option>{TIERS.map((tier) => <option key={tier} value={tier}>{title(tier)} · {money(ROUND2_CONFIG.prices[player.harvest!.mode][tier])}/unit</option>)}</select></label><p className="hint">Lower prices can reach more buyers; higher prices earn more per unit sold.</p></>}
+      </section> : <p className="inline-note">No harvest is ready to sell this round. Focus on what your farm will grow next.</p>}
+
+      <section className="action-card"><p className="card-kicker">{player.harvest ? '2' : '1'} · Farm for the next sale round</p><h3>Choose how to grow</h3>
+        {player.coop ? <p className="decision-note">You are a co-op member. Your farm grows organic crop and the group votes on its sale price.</p> : <fieldset className="farm-options"><legend className="sr-only">Farm path</legend>
+          <label className={choice === 'keep' ? 'option selected' : 'option'}><input type="radio" name={`farm-path-${player.id}`} checked={choice === 'keep'} onChange={() => onChange({ joinCoop: false, startConversion: false })} /><span><strong>{player.farmStatus === 'organic' ? 'Stay independent' : 'Keep conventional farming'}</strong><small>{player.farmStatus === 'organic' ? 'Grow on your organic plots and set your own price. $6 farm cost.' : 'Grow on both base plots and set your own price. $2 farm cost.'}</small></span></label>
+          {player.farmStatus === 'conventional' && <label className={choice === 'convert' ? 'option selected' : 'option'}><input type="radio" name={`farm-path-${player.id}`} checked={choice === 'convert'} onChange={() => onChange({ joinCoop: false, startConversion: true })} /><span><strong>Convert to organic</strong><small>{game.round === ROUND2_CONFIG.rounds ? 'Base plots rest; no later sale round remains. $2 farm cost.' : 'Base plots rest this round; they grow organic crop next round. $2 cost now, then $6.'}</small></span></label>}
+          <label className={choice === 'coop' ? 'option selected' : 'option'}><input type="radio" name={`farm-path-${player.id}`} checked={choice === 'coop'} onChange={() => onChange({ joinCoop: true, startConversion: false })} /><span><strong>Join the co-op permanently</strong><small>{game.round === ROUND2_CONFIG.rounds ? 'Vote on a shared price now. New growth will not reach a sale round. $6 farm cost.' : 'Gain one organic plot now, access contracts, and vote on a shared price. Conventional base plots convert this round. $6 farm cost.'}</small></span></label>
+        </fieldset>}
+        <div className="farm-forecast"><strong>{game.round === ROUND2_CONFIG.rounds ? 'Final growing round' : `Expected harvest for Round ${game.round + 1}`}</strong><span>{game.round === ROUND2_CONFIG.rounds ? 'There is no later sale round.' : forecast ? `${units(forecast.units)} ${forecast.mode} crop, before any shock` : 'No crop while base plots convert'}</span></div>
         <LandGrid land={previewLand} />
-        {player.farmStatus === 'conventional' && !plan.joinCoop && <label className="check"><input type="checkbox" checked={plan.startConversion} onChange={(event) => onChange({ startConversion: event.target.checked })} /> Start organic conversion</label>}
-        {!player.coop && <label className="check"><input type="checkbox" checked={plan.joinCoop} onChange={(event) => onChange({ joinCoop: event.target.checked })} /> Join co-op permanently</label>}
-        {plan.joinCoop && <p className="decision-note">Joining forces one-round conversion: the 2 base plots are blocked this round. The new co-op plot grows organic crop immediately; personal price control is lost.</p>}
-        {plan.startConversion && <p className="decision-note">Conversion blocks both base plots this round. They return as organic land next round; the farm still pays the normal $2 this round.</p>}
       </section>
-      <section className="action-card"><p className="card-kicker">C. Institutional safety net</p><h3>Contract</h3>
-        {player.contracts.length > 0 && <div className="contract-list">{player.contracts.map((contract) => <span key={contract.id}>{units(contract.quantity)} due R{contract.dueRound} · {money(contract.pricePerUnit)}/unit</span>)}</div>}
-        {(player.coop || plan.joinCoop) && game.round < ROUND2_CONFIG.rounds && forecast ? <><label>New contract quantity<select value={plan.contractQuantity ?? ''} onChange={(event) => onChange({ contractQuantity: event.target.value ? Number(event.target.value) : null })}><option value="">No new contract</option>{Array.from({ length: forecast.units }, (_, index) => index + 1).map((quantity) => <option value={quantity} key={quantity}>{units(quantity)} due next round</option>)}</select></label><p className="hint">Forecast: {units(forecast.units)} {forecast.mode} crop. One contract may be added this round at {money(ROUND2_CONFIG.contractPrice)}/unit; shortfalls cost {money(ROUND2_CONFIG.contractShortfallPenalty)}.</p></> : <p className="disabled-message">Contracts require co-op membership, a forecast crop, and a due round before the final round.</p>}
-      </section>
+
+      {(player.coop || plan.joinCoop) && game.round < ROUND2_CONFIG.rounds && forecast && <section className="action-card"><p className="card-kicker">{player.harvest ? '3' : '2'} · Co-op option</p><h3>Reserve next round’s harvest</h3><label className="field">New institutional contract<select value={plan.contractQuantity ?? ''} onChange={(event) => onChange({ contractQuantity: event.target.value ? Number(event.target.value) : null })}><option value="">No new contract</option>{Array.from({ length: forecast.units }, (_, index) => index + 1).map((quantity) => <option value={quantity} key={quantity}>{units(quantity)} due Round {game.round + 1}</option>)}</select></label><p className="hint">Up to {units(forecast.units)} at {money(ROUND2_CONFIG.contractPrice)}/unit. A shortfall costs {money(ROUND2_CONFIG.contractShortfallPenalty)}.</p></section>}
     </div>
-    <button className="primary advance" onClick={onAdvance}>{game.phase === 'planning' ? 'Save visible plan → Player next' : 'Lock plan → Player next'}</button>
+    <aside className="turn-sidebar" aria-label="Your farm at a glance"><div className="goal-box"><p className="card-kicker">Your public goal</p><strong>{player.role}</strong><span>{roleInstruction(player.role)}</span><small>{roleProgress(player)}</small></div><div className="farm-facts"><h3>Farm at a glance</h3><dl><div><dt>Cash</dt><dd>{money(player.cash)}</dd></div><div><dt>Farm now</dt><dd>{statusLabel(player, game.round)}</dd></div><div><dt>Planned farm cost</dt><dd>{money(plan.joinCoop ? ROUND2_CONFIG.organicCostPerRound : farmOperatingCost(player))} this round</dd></div><div><dt>Co-op</dt><dd>{player.coop ? 'Member' : plan.joinCoop ? 'Joining this round' : 'Independent'}</dd></div></dl>{player.contracts.length > 0 && <div className="contract-list"><strong>Existing contracts</strong>{player.contracts.map((contract) => <span key={contract.id}>{units(contract.quantity)} due Round {contract.dueRound} · {money(contract.pricePerUnit)}/unit</span>)}</div>}</div></aside>
+    </div>
+    <div className="turn-footer"><button className="primary advance" onClick={onAdvance}>Finish turn and continue</button><span>{nextStep}</span></div>
   </section>
 }
 
 function LandGrid({ land }: { land: Player['land'] }) {
-  return <div className="asset-grid"><strong>Land for next sale round</strong><div className="plot-grid">{land.map((plot) => <div className={`plot ${plot.state}`} key={plot.id}><span>{plot.kind === 'base' ? 'Base land' : 'Co-op land'}</span><strong>{title(plot.state.replace('-', ' '))}</strong></div>)}</div><p className="hint">Colours show growing conventional, growing organic, conversion, or crisis damage.</p></div>
+  return <div className="asset-grid"><strong>Plots this round</strong><div className="plot-grid">{land.map((plot) => <div className={`plot ${plot.state}`} key={plot.id}><span>{plot.kind === 'base' ? 'Base plot' : 'Co-op plot'}</span><strong>{plot.state === 'empty' ? 'Not in use' : title(plot.state.replace('-', ' '))}</strong></div>)}</div></div>
 }
 
-function HarvestGrid({ player, plan }: { player: Player; plan: GameState['plans'][string] }) {
-  const reserved = player.contracts.filter((contract) => contract.dueRound).reduce((sum, contract) => sum + contract.quantity, 0)
-  return <div className="asset-grid"><strong>Harvest ready now</strong><div className="harvest-grid"><span><b>{units(player.harvest!.units)}</b> ready</span><span>{title(player.harvest!.mode)}</span><span>{reserved ? `${units(reserved)} contract-reserved` : 'No contract reserved'}</span><span>{plan.saleTier ? `${title(plan.saleTier)} offer` : 'Shared co-op price'}</span></div></div>
+function HarvestGrid({ player, round }: { player: Player; round: number }) {
+  const reserved = player.contracts.filter((contract) => contract.dueRound === round).reduce((sum, contract) => sum + contract.quantity, 0)
+  return <div className="harvest-summary"><strong>{units(player.harvest!.units)} {player.harvest!.mode} crop</strong><span>{reserved ? `${units(reserved)} committed to a contract` : 'No contract due this round'}</span></div>
 }
 
 function VoteWorkspace({ game, player, onVote, onAdvance }: { game: GameState; player: Player; onVote: (tier: Tier) => void; onAdvance: () => void }) {
   const selected = game.votes[player.id]
-  return <section className="workspace vote-workspace"><div className="workspace-heading"><div><p className="eyebrow">Shared price decision</p><h2>Co-op vote: {player.name}</h2><p>All co-op harvests use one price tier this round. A tie resolves to Standard.</p></div><div className="goal-box"><strong>Current co-op output</strong><span>{player.harvest ? `${units(player.harvest.units)} ready to sell` : 'No personal harvest this round'}</span></div></div><div className="vote-options">{TIERS.map((tier) => <label className={selected === tier ? 'selected' : ''} key={tier}><input type="radio" name="coop-vote" checked={selected === tier} onChange={() => onVote(tier)} /> <strong>{title(tier)}</strong><span>{money(ROUND2_CONFIG.prices.organic[tier])}/organic unit</span></label>)}</div><button className="primary advance" onClick={onAdvance}>{game.activePlayerIndex === game.votePlayerIds.length - 1 ? 'Lock vote and reveal demand' : 'Save vote → Co-op member next'}</button></section>
+  const nextVoter = game.players.find((entry) => entry.id === game.votePlayerIds[game.activePlayerIndex + 1])
+  return <section className="workspace vote-workspace" aria-labelledby="screen-heading"><div className="workspace-heading"><p className="eyebrow">Shared price decision</p><h2 id="screen-heading" tabIndex={-1}>{player.name}, choose the co-op price</h2><p>Every co-op open-market sale uses the winning tier. Contract sales have a fixed price. Ties use Standard.</p></div><div className="vote-options">{TIERS.map((tier) => <label className={selected === tier ? 'option selected' : 'option'} key={tier}><input type="radio" name="coop-vote" checked={selected === tier} onChange={() => onVote(tier)} /><span><strong>{title(tier)}</strong><small>Conventional {money(ROUND2_CONFIG.prices.conventional[tier])} · Organic {money(ROUND2_CONFIG.prices.organic[tier])} per unit</small></span></label>)}</div><div className="turn-footer"><button className="primary advance" onClick={onAdvance}>{nextVoter ? 'Finish vote and continue' : 'Finish vote and reveal demand'}</button><span>{nextVoter ? `Next: ${nextVoter.name}` : 'Next: market results'}</span></div></section>
 }
 
 function MarketPreview({ game }: { game: GameState }) {
   const rows = game.players.flatMap((player) => {
     if (!player.harvest) return []
     const tier = player.coop || game.plans[player.id]?.joinCoop ? 'Co-op vote pending' : title(game.plans[player.id]?.saleTier ?? 'not priced')
-    return [{ player, tier }]
+    const reserved = player.contracts.filter((contract) => contract.dueRound === game.round).reduce((sum, contract) => sum + contract.quantity, 0)
+    const marketUnits = Math.max(0, player.harvest.units - reserved)
+    return [{ player, tier, marketUnits }]
   })
-  return <section className="market-preview"><div><p className="card-kicker">Market preview</p><h2>Supply is visible. Demand is not.</h2><p>Every farmer can see current sale inventory and selected prices before the demand card is revealed.</p></div><div className="preview-list">{rows.length ? rows.map(({ player, tier }) => <span key={player.id}><strong>{player.name}</strong> · {units(player.harvest!.units)} {player.harvest!.mode} · {tier}</span>) : <span>No farmer has a harvest to price in Round 1.</span>}</div></section>
+  return <section className="market-preview" aria-label="Visible market offers"><div><p className="card-kicker">Visible offers</p><p>Contract units are reserved first. Demand stays hidden until the reveal.</p></div><div className="preview-list">{rows.length ? rows.map(({ player, tier, marketUnits }) => <span key={player.id}><strong>{player.name}</strong> · {marketUnits ? `${units(marketUnits)} ${player.harvest!.mode} for market · ${tier}` : 'No crop left for the market'}</span>) : <span>No harvest is ready to sell this round.</span>}</div></section>
 }
 
 function PlayerRail({ game, activeId }: { game: GameState; activeId: string | null }) {
-  return <section className="farmer-rail"><h2>Public farm status</h2><div className="farmer-grid">{game.players.map((player) => <article key={player.id} className={`farmer-card ${player.id === activeId ? 'active' : ''}`}><div className="farmer-heading"><h3>{player.name}</h3><strong>{money(player.cash)}</strong></div><p className="role-title">{player.role}</p><p className="role-instruction">{roleInstruction(player.role)}</p><dl><div><dt>Farm</dt><dd>{statusLabel(player, game.round)}</dd></div><div><dt>Sale inventory</dt><dd>{player.harvest ? `${units(player.harvest.units)} ${player.harvest.mode}` : 'None'}</dd></div><div><dt>Operating cost</dt><dd>{money(farmOperatingCost(player))}</dd></div><div><dt>Co-op</dt><dd>{player.coop ? 'Member · shared price' : 'Independent'}</dd></div><div><dt>Contracts</dt><dd>{player.contracts.length ? player.contracts.map((contract) => `${contract.quantity} due R${contract.dueRound}`).join(', ') : 'None'}</dd></div></dl><MiniLandGrid land={player.land} /><p className="role-progress">{roleProgress(player)}</p></article>)}</div></section>
+  return <section className="farmer-rail"><div className="section-heading"><h2>All farmers</h2><p>Public status · select a card for details</p></div><div className="farmer-grid">{game.players.map((player) => <article key={player.id} className={`farmer-card ${player.id === activeId ? 'active' : ''}`}>
+    <div className="farmer-heading"><h3>{player.name}</h3><strong>{money(player.cash)}</strong></div>{player.id === activeId && <span className="active-tag">Current turn</span>}<p className="role-title">{player.role}</p><p className="role-progress">{roleProgress(player)}</p><p className="farm-status">{statusLabel(player, game.round)} · {player.coop ? 'Co-op' : 'Independent'}</p>
+    <details className="farmer-details"><summary>Farm details</summary><p>{roleInstruction(player.role)}</p><dl><div><dt>Sale inventory</dt><dd>{player.harvest ? `${units(player.harvest.units)} ${player.harvest.mode}` : 'None'}</dd></div><div><dt>Operating cost</dt><dd>{money(farmOperatingCost(player))}</dd></div><div><dt>Contracts</dt><dd>{player.contracts.length ? player.contracts.map((contract) => `${contract.quantity} due R${contract.dueRound}`).join(', ') : 'None'}</dd></div></dl><MiniLandGrid land={player.land} /></details>
+  </article>)}</div></section>
 }
 
 function MiniLandGrid({ land }: { land: Player['land'] }) {
@@ -137,11 +174,13 @@ function roleProgress(player: Player): string {
 
 function Resolution({ game, onNext }: { game: GameState; onNext: () => void }) {
   const resolution = game.resolution!
-  return <section className="resolution"><div className="resolution-heading"><div><p className="eyebrow">Demand revealed</p><h2>{resolution.demand?.label ?? 'First harvest is growing'}</h2><p>{resolution.note}</p></div><div className="shock-box"><strong>Shock</strong><span>{resolution.shock ? title(resolution.shock) : 'None'}</span></div></div>
+  const sold = resolution.lines.reduce((sum, line) => sum + line.contractUnits + line.marketUnits, 0)
+  const spoilage = resolution.lines.reduce((sum, line) => sum + line.spoilage, 0)
+  return <section className="resolution" aria-labelledby="screen-heading"><div className="resolution-heading"><div><p className="eyebrow">Round {game.round} results</p><h2 id="screen-heading" tabIndex={-1}>{resolution.demand?.label ?? 'First harvest is growing'}</h2><p>{resolution.note}</p></div>{resolution.shock && <div className="shock-box"><strong>Shock</strong><span>{title(resolution.shock)}</span></div>}</div>
     {resolution.crisisImpact && <CrisisPanel game={game} />}
-    {resolution.markets.length ? <div className="market-charts">{resolution.markets.map((market) => <MarketChart key={market.mode} market={market} />)}</div> : <p className="empty-resolution">No sale market in Round 1. The crop planted this round becomes visible sale inventory in Round 2.</p>}
-    <AuditTable game={game} />
-    {game.votePlayerIds.length > 0 && <p className="hint">Co-op elected {title(winningCoopTier(game))} for this round.</p>}
+    <div className="outcome-stats"><div><strong>{units(sold)}</strong><span>Sold, including contracts</span></div><div><strong>{units(spoilage)}</strong><span>Unsold crop</span></div>{game.votePlayerIds.length > 0 && <div><strong>{title(winningCoopTier(game))}</strong><span>Co-op price tier</span></div>}</div>
+    <h3>What happened to each farmer</h3><div className="outcome-list">{game.players.map((player) => { const line = resolution.lines.find((entry) => entry.playerId === player.id)!; const tier = player.coop ? winningCoopTier(game) : game.plans[player.id].saleTier; const hadMarketCrop = line.marketUnits + line.spoilage > 0; const priceOutcome = hadMarketCrop && resolution.shock === 'marketClosure' ? 'Market closed' : hadMarketCrop && tier ? `${title(tier)} price chosen` : 'No market offer'; return <div className="outcome-row" key={player.id}><strong>{player.name}</strong><span>{priceOutcome}</span><span>{units(line.contractUnits + line.marketUnits)} sold{line.contractUnits ? ` (${units(line.contractUnits)} by contract)` : ''}{line.contractShortfall ? ` · ${units(line.contractShortfall)} short` : ''}</span><span>{units(line.spoilage)} unsold</span><strong className={line.revenue - line.costs < 0 ? 'negative' : 'positive'}>{signedMoney(line.revenue - line.costs)} cash</strong></div> })}</div>
+    <details className="detail-panel"><summary>See demand charts and full round audit</summary>{resolution.markets.length ? <div className="market-charts">{resolution.markets.map((market) => <MarketChart key={market.mode} market={market} />)}</div> : <p className="empty-resolution">No open-market chart is available this round.</p>}<AuditTable game={game} /></details>
     <button className="primary advance" onClick={onNext}>{game.round === ROUND2_CONFIG.rounds ? 'Open group debrief' : 'Start next round'}</button>
   </section>
 }
@@ -165,12 +204,12 @@ function SupplyBar({ supply, sold }: { supply: Record<Tier, number>; sold: Recor
 }
 
 function AuditTable({ game }: { game: GameState }) {
-  return <div className="audit"><h3>Round audit</h3><div className="table-wrap"><table><thead><tr><th>Farmer</th><th>Contract</th><th>Local</th><th>Tourist</th><th>Spoilage</th><th>Revenue</th><th>Organic cost</th><th>Cash</th></tr></thead><tbody>{game.players.map((player) => { const line = game.resolution!.lines.find((entry) => entry.playerId === player.id)!; return <tr key={player.id}><td>{player.name}</td><td>{units(line.contractUnits)}{line.contractShortfall ? ` · ${units(line.contractShortfall)} short` : ''}</td><td>{units(line.localUnits)}</td><td>{units(line.touristUnits)}</td><td>{units(line.spoilage)}</td><td>{money(line.revenue)}</td><td>{money(line.costs)}</td><td>{money(player.cash)}</td></tr> })}</tbody></table></div></div>
+  return <div className="audit"><h3>Round audit</h3><div className="table-wrap"><table><thead><tr><th>Farmer</th><th>Contract</th><th>Local</th><th>Tourist</th><th>Spoilage</th><th>Revenue</th><th>Farm cost</th><th>Cash</th></tr></thead><tbody>{game.players.map((player) => { const line = game.resolution!.lines.find((entry) => entry.playerId === player.id)!; return <tr key={player.id}><td>{player.name}</td><td>{units(line.contractUnits)}{line.contractShortfall ? ` · ${units(line.contractShortfall)} short` : ''}</td><td>{units(line.localUnits)}</td><td>{units(line.touristUnits)}</td><td>{units(line.spoilage)}</td><td>{money(line.revenue)}</td><td>{money(line.costs)}</td><td>{money(player.cash)}</td></tr> })}</tbody></table></div></div>
 }
 
 function Debrief({ game }: { game: GameState }) {
   const total = (key: 'affordableLocalSales' | 'touristSales' | 'totalSpoilage' | 'contractsFulfilled') => game.players.reduce((sum, player) => sum + player.metrics[key], 0)
-  return <section className="debrief"><p className="eyebrow">Five-round outcome</p><h2>Group debrief</h2><div className="metric-grid"><div><strong>{units(total('affordableLocalSales'))}</strong><span>Affordable Local sales</span></div><div><strong>{units(total('touristSales'))}</strong><span>Tourist sales</span></div><div><strong>{units(total('totalSpoilage'))}</strong><span>Spoilage</span></div><div><strong>{total('contractsFulfilled')}</strong><span>Contracts fulfilled</span></div></div><div className="table-wrap"><table><thead><tr><th>Farmer</th><th>Public goal</th><th>Outcome</th><th>Progress</th></tr></thead><tbody>{game.players.map((player) => <tr key={player.id}><td>{player.name}</td><td>{roleInstruction(player.role)}</td><td>{rolePassed(player) ? 'Met condition' : 'Not met'}</td><td>{roleProgress(player)}</td></tr>)}</tbody></table></div><p className="discussion">Discuss: Which price choices were exposed by demand? Did the co-op’s shared price help or constrain its members? Was the $6 conversion cost worth the delayed organic output?</p></section>
+  return <section className="debrief"><p className="eyebrow">Five-round outcome</p><h2 id="screen-heading" tabIndex={-1}>Group debrief</h2><div className="metric-grid"><div><strong>{units(total('affordableLocalSales'))}</strong><span>Affordable Local sales</span></div><div><strong>{units(total('touristSales'))}</strong><span>Tourist sales</span></div><div><strong>{units(total('totalSpoilage'))}</strong><span>Spoilage</span></div><div><strong>{total('contractsFulfilled')}</strong><span>Contracts fulfilled</span></div></div><div className="table-wrap"><table><thead><tr><th>Farmer</th><th>Public goal</th><th>Outcome</th><th>Progress</th></tr></thead><tbody>{game.players.map((player) => <tr key={player.id}><td>{player.name}</td><td>{roleInstruction(player.role)}</td><td>{rolePassed(player) ? 'Met condition' : 'Not met'}</td><td>{roleProgress(player)}</td></tr>)}</tbody></table></div><p className="discussion">Discuss: Which price choices were exposed by demand? Did the co-op’s shared price help or constrain its members? Was the $6 organic farm cost worth the delayed output?</p></section>
 }
 
 export default App

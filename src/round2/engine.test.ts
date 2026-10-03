@@ -1,23 +1,35 @@
 import { describe, expect, it } from 'vitest'
 import { ROUND2_CONFIG } from './config'
-import { advanceConfirming, advancePlanning, advanceRound, advanceVoting, createGame, forecastHarvest, resolveCurrentRound, rolePassed, updatePlan, winningCoopTier } from './engine'
+import { advancePlanning, advanceRound, advanceVoting, createGame, forecastHarvest, resolveCurrentRound, rolePassed, updatePlan, winningCoopTier } from './engine'
 
 const names = ['A', 'B', 'C', 'D', 'E']
 const fixed = () => 0
 
 describe('round 2 engine', () => {
-  it('always begins both passes with Player 1', () => {
+  it('moves directly from the fifth farmer to results when no one joins the co-op', () => {
     let game = createGame(names, fixed)
     for (let index = 0; index < 5; index += 1) game = advancePlanning(game)
-    expect(game.phase).toBe('confirming')
+    expect(game.phase).toBe('resolution')
     expect(game.activePlayerIndex).toBe(0)
+    expect(game.resolution).not.toBeNull()
+  })
+
+  it('validates each plan before passing the device and prevents editing a past turn', () => {
+    let game = createGame(names, fixed)
+    game.players[0].harvest = { mode: 'conventional', units: 2, plantedRound: 0 }
+    game = updatePlan(game, 'p1', { saleTier: null })
+    expect(() => advancePlanning(game)).toThrow('A must price their available harvest')
+    game = updatePlan(game, 'p1', { saleTier: 'affordable' })
+    game = advancePlanning(game)
+    expect(game.activePlayerIndex).toBe(1)
+    expect(updatePlan(game, 'p1', { saleTier: 'premium' }).plans.p1.saleTier).toBe('affordable')
   })
 
   it('blocks base plots for one conversion round but grants an immediate organic co-op plot', () => {
     let game = createGame(names, fixed)
     game = updatePlan(game, 'p1', { joinCoop: true })
     for (let index = 0; index < 5; index += 1) game = advancePlanning(game)
-    for (let index = 0; index < 5; index += 1) game = advanceConfirming(game)
+    expect(game.phase).toBe('voting')
     expect(game.players[0].farmStatus).toBe('converting')
     expect(game.players[0].growingHarvest).toEqual({ mode: 'organic', units: ROUND2_CONFIG.yieldPerPlot, plantedRound: 1 })
     game = advanceVoting(game)
@@ -88,7 +100,6 @@ describe('round 2 engine', () => {
     expect(game.plans.p1.contractQuantity).toBe(3)
     game = updatePlan(game, 'p1', { contractQuantity: 2 })
     for (let index = 0; index < 5; index += 1) game = advancePlanning(game)
-    for (let index = 0; index < 5; index += 1) game = advanceConfirming(game)
     game = advanceVoting(game)
     expect(game.players[0].contracts).toEqual([expect.objectContaining({ quantity: 2, dueRound: 3, pricePerUnit: 4 })])
   })
@@ -147,7 +158,6 @@ describe('round 2 engine', () => {
     let game = createGame(names, fixed)
     for (let round = 1; round <= 5; round += 1) {
       for (let index = 0; index < 5; index += 1) game = advancePlanning(game)
-      for (let index = 0; index < 5; index += 1) game = advanceConfirming(game)
       if (game.phase === 'voting') {
         for (let index = 0; index < game.votePlayerIds.length; index += 1) {
           game = advanceVoting(game)
