@@ -1,5 +1,5 @@
 import { ROUND2_CONFIG, ROUND2_DEMAND_DECK } from './config'
-import { Contract, CrisisImpact, DemandCard, GameState, LandPlot, MarketSnapshot, Mode, Player, PlotState, ResolutionLine, Role, ROLES, SOURCES, Source, SourceDemand, Tier, TIERS, TierValues, TurnPlan } from './types'
+import { Contract, CrisisImpact, DemandCard, GameState, LandPlot, MarketSnapshot, Mode, Player, PlotState, ResolutionLine, Role, ROLES, ShockType, SOURCES, Source, SourceDemand, Tier, TIERS, TierValues, TurnPlan } from './types'
 
 const clone = <T,>(value: T): T => structuredClone(value)
 const emptyTiers = (): TierValues => ({ affordable: 0, standard: 0, premium: 0 })
@@ -25,6 +25,7 @@ const emptyPlan = (player: Player): TurnPlan => ({
   joinCoop: false,
   startConversion: false,
   contractQuantity: null,
+  shockFund: false,
 })
 
 export const conversionRoundsLeft = (player: Player, round: number): number => {
@@ -84,6 +85,22 @@ export function createGame(names: string[], random = Math.random): GameState {
     contracts: [],
     metrics: { affordableLocalSales: 0, touristSales: 0, organicUnitsSold: 0, contractsSigned: 0, contractsFulfilled: 0, totalSpoilage: 0 },
   }))
+  const shockTypes = shuffle(ROUND2_CONFIG.shockDeck, random).slice(0, 2)
+  const shockRounds = shuffle([2, 3, 4, 5], random).slice(0, 2)
+  const floodIndex = shockTypes.indexOf('flood')
+  if (floodIndex >= 0 && shockRounds[floodIndex] === 5) {
+    const otherIndex = 1 - floodIndex
+    ;[shockRounds[floodIndex], shockRounds[otherIndex]] = [shockRounds[otherIndex], shockRounds[floodIndex]]
+  }
+  const shocksByRound: GameState['shocksByRound'] = Object.fromEntries(Array.from({ length: ROUND2_CONFIG.rounds }, (_, index) => [index + 1, null]))
+  shockTypes.forEach((shock, index) => { shocksByRound[shockRounds[index]] = shock })
+  const riskSignals: GameState['riskSignals'] = Object.fromEntries(Array.from({ length: ROUND2_CONFIG.rounds }, (_, index) => {
+    const round = index + 1
+    const shock = shocksByRound[round]
+    if (round === 1) return [round, null]
+    if (shock) return [round, random() < ROUND2_CONFIG.forecastHitChance ? shock : null]
+    return [round, random() < ROUND2_CONFIG.forecastFalseAlarmChance ? shuffle(ROUND2_CONFIG.shockDeck, random)[0] : null]
+  }))
   return {
     round: 1,
     phase: 'planning',
@@ -93,8 +110,8 @@ export function createGame(names: string[], random = Math.random): GameState {
     votePlayerIds: [],
     votes: {},
     demandDeck: shuffle(ROUND2_DEMAND_DECK, random),
-    shockRound: 2 + Math.floor(random() * 3),
-    shock: shuffle(ROUND2_CONFIG.shockDeck, random)[0],
+    shocksByRound,
+    riskSignals,
     resolution: null,
   }
 }
@@ -132,6 +149,7 @@ export function advancePlanning(state: GameState): GameState {
 
 function validatePlan(player: Player, plan: TurnPlan, round: number): void {
   if (player.harvest && !player.coop && !plan.joinCoop && !plan.saleTier) throw new Error(`${player.name} must price their available harvest.`)
+  if (plan.shockFund && (round === 1 || player.cash < ROUND2_CONFIG.shockFundCost)) throw new Error(`${player.name} cannot buy shock cover this round.`)
   if (plan.contractQuantity !== null) {
     if (!(player.coop || plan.joinCoop)) throw new Error('Only co-op members may sign an institutional contract.')
     if (round >= ROUND2_CONFIG.rounds) throw new Error('No new contracts can be due after the final round.')
@@ -194,7 +212,7 @@ export const combinedDemand = (demand: SourceDemand): TierValues => TIERS.reduce
   return total
 }, emptyTiers())
 
-function effectiveDemand(demand: SourceDemand, shock: GameState['shock'] | null): SourceDemand {
+function effectiveDemand(demand: SourceDemand, shock: ShockType | null): SourceDemand {
   const next = clone(demand)
   if (shock === 'tourismCollapse') next.tourist = emptyTiers()
   return next
@@ -282,12 +300,12 @@ function applyFlood(next: GameState, impact: CrisisImpact): void {
   }
 }
 
-const initialLine = (player: Player): ResolutionLine => ({ playerId: player.id, contractUnits: 0, contractShortfall: 0, localUnits: 0, touristUnits: 0, affordableLocalUnits: 0, organicUnitsSold: 0, marketUnits: 0, spoilage: 0, revenue: 0, costs: 0 })
+const initialLine = (player: Player): ResolutionLine => ({ playerId: player.id, harvestMode: player.harvest?.mode ?? null, saleInventoryUnits: player.harvest?.units ?? 0, contractUnits: 0, contractShortfall: 0, localUnits: 0, touristUnits: 0, affordableLocalUnits: 0, organicUnitsSold: 0, marketUnits: 0, spoilage: 0, revenue: 0, costs: 0, fundCost: 0, fundPayout: 0 })
 
 export function resolveCurrentRound(state: GameState): GameState {
   const next = clone(state)
   const saleRound = next.round >= 2
-  const shock = next.round === next.shockRound ? next.shock : null
+  const shock = next.shocksByRound[next.round] ?? null
   const demandCard = saleRound ? next.demandDeck[next.round - 2] : null
   const lines = Object.fromEntries(next.players.map((player) => [player.id, initialLine(player)])) as Record<string, ResolutionLine>
   const impact: CrisisImpact | null = shock ? { shock, headline: '', playerImpacts: [], touristDemandRemoved: 0 } : null
@@ -349,7 +367,9 @@ export function resolveCurrentRound(state: GameState): GameState {
   }
   for (const player of next.players) {
     lines[player.id].costs = farmOperatingCost(player)
-    player.cash = round2(player.cash + lines[player.id].revenue - lines[player.id].costs)
+    lines[player.id].fundCost = next.plans[player.id].shockFund ? ROUND2_CONFIG.shockFundCost : 0
+    lines[player.id].fundPayout = shock && next.plans[player.id].shockFund ? ROUND2_CONFIG.shockFundPayout : 0
+    player.cash = round2(player.cash + lines[player.id].revenue - lines[player.id].costs - lines[player.id].fundCost + lines[player.id].fundPayout)
     lines[player.id].revenue = round2(lines[player.id].revenue)
   }
   next.phase = 'resolution'

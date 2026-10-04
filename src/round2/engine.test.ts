@@ -6,6 +6,42 @@ const names = ['A', 'B', 'C', 'D', 'E']
 const fixed = () => 0
 
 describe('round 2 engine', () => {
+  it('uses two different shocks, keeps floods before the final round, and allows imperfect warnings', () => {
+    for (let seed = 1; seed <= 30; seed += 1) {
+      let value = seed
+      const random = () => { value = (value * 1664525 + 1013904223) >>> 0; return value / 2 ** 32 }
+      const game = createGame(names, random)
+      const shocks = Object.entries(game.shocksByRound).filter(([, shock]) => shock !== null)
+      expect(shocks).toHaveLength(2)
+      expect(new Set(shocks.map(([, shock]) => shock)).size).toBe(2)
+      expect(game.shocksByRound[1]).toBeNull()
+      expect(game.shocksByRound[5]).not.toBe('flood')
+    }
+    const falseAlarm = createGame(names, () => 0)
+    const clearRound = [2, 3, 4, 5].find((round) => !falseAlarm.shocksByRound[round])!
+    expect(falseAlarm.riskSignals[clearRound]).not.toBeNull()
+    const missedWarning = createGame(names, () => 0.99)
+    const shockRound = [2, 3, 4, 5].find((round) => missedWarning.shocksByRound[round])!
+    expect(missedWarning.riskSignals[shockRound]).toBeNull()
+  })
+
+  it('charges for optional shock cover and pays only when a shock occurs', () => {
+    const game = createGame(names, fixed)
+    game.round = 2
+    game.shocksByRound[2] = null
+    game.plans.p1.shockFund = true
+    const quiet = resolveCurrentRound(game)
+    expect(quiet.resolution!.lines[0]).toMatchObject({ fundCost: 2, fundPayout: 0 })
+    expect(quiet.players[0].cash).toBe(14)
+
+    game.shocksByRound[2] = 'tourismCollapse'
+    const shocked = resolveCurrentRound(game)
+    expect(shocked.resolution!.lines[0]).toMatchObject({ fundCost: 2, fundPayout: 4 })
+    expect(shocked.players[0].cash).toBe(18)
+    game.players[0].cash = 1
+    expect(() => advancePlanning(game)).toThrow('cannot buy shock cover')
+  })
+
   it('moves directly from the fifth farmer to results when no one joins the co-op', () => {
     let game = createGame(names, fixed)
     for (let index = 0; index < 5; index += 1) game = advancePlanning(game)
@@ -54,7 +90,7 @@ describe('round 2 engine', () => {
   it('allocates lower-priced supply before higher-priced supply and splits equal offers', () => {
     let game = createGame(names, fixed)
     game.round = 2
-    game.shockRound = 99
+    game.shocksByRound[2] = null
     game.demandDeck[0].demand.conventional.local = { affordable: 5, standard: 3, premium: 0 }
     game.players[0].harvest = { mode: 'conventional', units: 4, plantedRound: 1 }
     game.players[1].harvest = { mode: 'conventional', units: 4, plantedRound: 1 }
@@ -71,7 +107,7 @@ describe('round 2 engine', () => {
   it('aggregates local and tourist demand within the organic market', () => {
     let game = createGame(names, fixed)
     game.round = 2
-    game.shockRound = 99
+    game.shocksByRound[2] = null
     game.players[0].harvest = { mode: 'organic', units: 2, plantedRound: 1 }
     game.plans.p1.saleTier = 'standard'
     game = resolveCurrentRound(game)
@@ -107,8 +143,7 @@ describe('round 2 engine', () => {
   it('records flood losses in both plot state and crisis impact', () => {
     let game = createGame(names, fixed)
     game.round = 2
-    game.shockRound = 2
-    game.shock = 'flood'
+    game.shocksByRound[2] = 'flood'
     game.players[0].growingHarvest = { mode: 'conventional', units: 2, plantedRound: 2 }
     game.players[0].land[0].state = 'growing-conventional'
     game.players[0].land[1].state = 'growing-conventional'
@@ -120,8 +155,7 @@ describe('round 2 engine', () => {
   it('states the open-market inventory blocked by a market closure', () => {
     let game = createGame(names, fixed)
     game.round = 2
-    game.shockRound = 2
-    game.shock = 'marketClosure'
+    game.shocksByRound[2] = 'marketClosure'
     game.players[0].harvest = { mode: 'conventional', units: 2, plantedRound: 1 }
     game.plans.p1.saleTier = 'affordable'
     game = resolveCurrentRound(game)
@@ -132,8 +166,7 @@ describe('round 2 engine', () => {
   it('removes and records tourist demand during a tourism collapse', () => {
     let game = createGame(names, fixed)
     game.round = 2
-    game.shockRound = 2
-    game.shock = 'tourismCollapse'
+    game.shocksByRound[2] = 'tourismCollapse'
     game.players[0].harvest = { mode: 'organic', units: 1, plantedRound: 1 }
     game.plans.p1.saleTier = 'standard'
     game = resolveCurrentRound(game)
@@ -145,7 +178,7 @@ describe('round 2 engine', () => {
   it('counts organic contract delivery toward the Organic Pioneer goal', () => {
     let game = createGame(names, fixed)
     game.round = 2
-    game.shockRound = 99
+    game.shocksByRound[2] = null
     game.players[0].role = 'Organic Pioneer'
     game.players[0].harvest = { mode: 'organic', units: 3, plantedRound: 1 }
     game.players[0].contracts = [{ id: 'organic-contract', quantity: 3, dueRound: 2, pricePerUnit: 4, signedRound: 1 }]

@@ -11,6 +11,11 @@ export const ROUND2_CONFIG = {
   organicCostPerRound: 6,
   contractPrice: 4,
   contractShortfallPenalty: 4,
+  shockFundCost: 2,
+  shockFundPayout: 4,
+  // Playtest signals: warnings can miss a shock or be a false alarm.
+  forecastHitChance: 0.7,
+  forecastFalseAlarmChance: 0.35,
   floodLossFraction: 0.5,
   prices: {
     conventional: { affordable: 2, standard: 4, premium: 6 },

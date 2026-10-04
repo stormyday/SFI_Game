@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useState } from 'react'
 import { ROUND2_CONFIG } from './round2/config'
 import { advancePlanning, advanceRound, advanceVoting, combinedDemand, conversionRoundsLeft, createGame, farmOperatingCost, forecastHarvest, phaseLabel, previewLandPlots, roleInstruction, rolePassed, updatePlan, updateVote, winningCoopTier } from './round2/engine'
-import { GameState, MarketSnapshot, Player, Tier, TIERS } from './round2/types'
+import { GameState, MarketSnapshot, Player, ResolutionLine, Tier, TIERS } from './round2/types'
 
 const title = (value: string) => value.replace(/([A-Z])/g, ' $1').replace(/^./, (letter) => letter.toUpperCase())
 const money = (value: number) => `$${value.toFixed(2)}`
@@ -103,9 +103,11 @@ function PlanningWorkspace({ game, player, onChange, onAdvance }: { game: GameSt
   const nextPlayer = game.players[game.activePlayerIndex + 1]
   const willVote = game.players.some((entry) => entry.coop || game.plans[entry.id].joinCoop)
   const nextStep = nextPlayer ? `Next: ${nextPlayer.name}` : willVote ? 'Next: co-op vote' : 'Next: market results'
+  const riskSignal = game.riskSignals[game.round]
   return <section className="workspace" aria-labelledby="screen-heading">
     <div className="workspace-heading"><p className="eyebrow">Your turn</p><h2 id="screen-heading" tabIndex={-1}>{player.name}, make your choices</h2><p>Your choices are final when you finish this turn. Demand stays hidden until every farmer has played.</p></div>
     <div className="workspace-grid"><div className="decision-flow">
+      {game.round > 1 && <section className="risk-card"><p className="card-kicker">This round’s forecast</p><h3>{riskSignal ? `Possible ${title(riskSignal)}` : 'No specific warning'}</h3><p>Warnings can be false or miss a shock. The outcome is revealed after everyone finishes.</p><label className={plan.shockFund ? 'option selected' : 'option'}><input type="checkbox" checked={plan.shockFund} disabled={player.cash < ROUND2_CONFIG.shockFundCost} onChange={(event) => onChange({ shockFund: event.target.checked })} /><span><strong>Buy shock cover for {money(ROUND2_CONFIG.shockFundCost)}</strong><small>Charged at the reveal. Receive {money(ROUND2_CONFIG.shockFundPayout)} if any shock occurs this round, even if your own crop is unaffected. No payout if there is no shock.{player.cash < ROUND2_CONFIG.shockFundCost ? ' Not enough cash to buy cover.' : ''}</small></span></label></section>}
       {player.harvest ? <section className="action-card"><p className="card-kicker">1 · Harvest ready now</p><h3>Set this round’s sale price</h3><HarvestGrid player={player} round={game.round} />
         {player.coop || plan.joinCoop ? <p className="decision-note">The co-op will vote on a shared price tier after every farmer finishes their turn.</p> : <><label className="field">Your sale price<select value={plan.saleTier ?? ''} onChange={(event) => onChange({ saleTier: event.target.value as Tier })}><option value="">Choose a tier</option>{TIERS.map((tier) => <option key={tier} value={tier}>{title(tier)} · {money(ROUND2_CONFIG.prices[player.harvest!.mode][tier])}/unit</option>)}</select></label><p className="hint">Lower prices can reach more buyers; higher prices earn more per unit sold.</p></>}
       </section> : <p className="inline-note">No harvest is ready to sell this round. Focus on what your farm will grow next.</p>}
@@ -156,7 +158,7 @@ function MarketPreview({ game }: { game: GameState }) {
 
 function PlayerRail({ game, activeId }: { game: GameState; activeId: string | null }) {
   return <section className="farmer-rail"><div className="section-heading"><h2>All farmers</h2><p>Public status · select a card for details</p></div><div className="farmer-grid">{game.players.map((player) => <article key={player.id} className={`farmer-card ${player.id === activeId ? 'active' : ''}`}>
-    <div className="farmer-heading"><h3>{player.name}</h3><strong>{money(player.cash)}</strong></div>{player.id === activeId && <span className="active-tag">Current turn</span>}<p className="role-title">{player.role}</p><p className="role-progress">{roleProgress(player)}</p><p className="farm-status">{statusLabel(player, game.round)} · {player.coop ? 'Co-op' : 'Independent'}</p>
+    <div className="farmer-heading"><h3>{player.name}</h3><strong>{money(player.cash)}</strong></div>{player.id === activeId && <span className="active-tag">Current turn</span>}<p className="role-title">{player.role}</p><p className="role-progress">{roleProgress(player)}</p><p className="farm-status">{statusLabel(player, game.round)} · {player.coop ? 'Co-op' : 'Independent'}{game.plans[player.id].shockFund ? ' · Cover chosen' : ''}</p>
     <details className="farmer-details"><summary>Farm details</summary><p>{roleInstruction(player.role)}</p><dl><div><dt>Sale inventory</dt><dd>{player.harvest ? `${units(player.harvest.units)} ${player.harvest.mode}` : 'None'}</dd></div><div><dt>Operating cost</dt><dd>{money(farmOperatingCost(player))}</dd></div><div><dt>Contracts</dt><dd>{player.contracts.length ? player.contracts.map((contract) => `${contract.quantity} due R${contract.dueRound}`).join(', ') : 'None'}</dd></div></dl><MiniLandGrid land={player.land} /></details>
   </article>)}</div></section>
 }
@@ -172,14 +174,35 @@ function roleProgress(player: Player): string {
   return `${player.metrics.contractsFulfilled} / 2 fulfilled · ${player.metrics.contractsSigned} signed`
 }
 
+function shockImpactText(game: GameState, player: Player, line: ResolutionLine): string {
+  const impact = game.resolution!.crisisImpact!.playerImpacts.find((entry) => entry.playerId === player.id)
+  if (game.resolution!.shock === 'flood') return impact?.growingCropsLost ? `${units(impact.growingCropsLost)} of next round’s growing crop lost.` : 'No growing crop lost this round.'
+  if (game.resolution!.shock === 'marketClosure') {
+    const blocked = impact?.openMarketBlocked ?? 0
+    if (blocked && line.contractUnits) return `${units(blocked)} blocked from the market; ${units(line.contractUnits)} still delivered by contract.`
+    if (blocked) return `${units(blocked)} blocked from the market.`
+    return line.contractUnits ? `${units(line.contractUnits)} still delivered by contract.` : 'No sale inventory was exposed.'
+  }
+  if (line.harvestMode === 'organic') return `Tourist demand vanished; ${units(line.spoilage)} left unsold from ${units(line.saleInventoryUnits)} organic crop ready to sell.`
+  if (line.harvestMode === 'conventional') return `Conventional buyers remained; ${units(line.marketUnits)} sold in the market.`
+  return 'No sale inventory was exposed.'
+}
+
+function ShockComparison({ game }: { game: GameState }) {
+  return <section className="shock-comparison"><h3>Same shock, different farms</h3><div className="impact-grid">{game.players.map((player) => { const line = game.resolution!.lines.find((entry) => entry.playerId === player.id)!; return <article key={player.id}><strong>{player.name}</strong><small>{player.role}</small><p>{shockImpactText(game, player, line)}</p><span>Cash left: {money(player.cash)}</span><span>Goal: {roleProgress(player)}</span><span>{line.fundCost ? `Cover: ${money(line.fundCost)} paid, ${money(line.fundPayout)} received` : 'No shock cover'}</span></article> })}</div><p className="reflection-prompt">Discuss: Who could absorb this shock? Which farmer had the fewest options?</p></section>
+}
+
 function Resolution({ game, onNext }: { game: GameState; onNext: () => void }) {
   const resolution = game.resolution!
   const sold = resolution.lines.reduce((sum, line) => sum + line.contractUnits + line.marketUnits, 0)
   const spoilage = resolution.lines.reduce((sum, line) => sum + line.spoilage, 0)
+  const riskSignal = game.riskSignals[game.round]
   return <section className="resolution" aria-labelledby="screen-heading"><div className="resolution-heading"><div><p className="eyebrow">Round {game.round} results</p><h2 id="screen-heading" tabIndex={-1}>{resolution.demand?.label ?? 'First harvest is growing'}</h2><p>{resolution.note}</p></div>{resolution.shock && <div className="shock-box"><strong>Shock</strong><span>{title(resolution.shock)}</span></div>}</div>
+    {game.round > 1 && <p className="forecast-result">Forecast: {riskSignal ? `possible ${title(riskSignal)}` : 'no specific warning'} · Actual: {resolution.shock ? title(resolution.shock) : 'no shock'}</p>}
     {resolution.crisisImpact && <CrisisPanel game={game} />}
+    {resolution.shock && <ShockComparison game={game} />}
     <div className="outcome-stats"><div><strong>{units(sold)}</strong><span>Sold, including contracts</span></div><div><strong>{units(spoilage)}</strong><span>Unsold crop</span></div>{game.votePlayerIds.length > 0 && <div><strong>{title(winningCoopTier(game))}</strong><span>Co-op price tier</span></div>}</div>
-    <h3>What happened to each farmer</h3><div className="outcome-list">{game.players.map((player) => { const line = resolution.lines.find((entry) => entry.playerId === player.id)!; const tier = player.coop ? winningCoopTier(game) : game.plans[player.id].saleTier; const hadMarketCrop = line.marketUnits + line.spoilage > 0; const priceOutcome = hadMarketCrop && resolution.shock === 'marketClosure' ? 'Market closed' : hadMarketCrop && tier ? `${title(tier)} price chosen` : 'No market offer'; return <div className="outcome-row" key={player.id}><strong>{player.name}</strong><span>{priceOutcome}</span><span>{units(line.contractUnits + line.marketUnits)} sold{line.contractUnits ? ` (${units(line.contractUnits)} by contract)` : ''}{line.contractShortfall ? ` · ${units(line.contractShortfall)} short` : ''}</span><span>{units(line.spoilage)} unsold</span><strong className={line.revenue - line.costs < 0 ? 'negative' : 'positive'}>{signedMoney(line.revenue - line.costs)} cash</strong></div> })}</div>
+    <h3>What happened to each farmer</h3><div className="outcome-list">{game.players.map((player) => { const line = resolution.lines.find((entry) => entry.playerId === player.id)!; const tier = player.coop ? winningCoopTier(game) : game.plans[player.id].saleTier; const hadMarketCrop = line.marketUnits + line.spoilage > 0; const priceOutcome = hadMarketCrop && resolution.shock === 'marketClosure' ? 'Market closed' : hadMarketCrop && tier ? `${title(tier)} price chosen` : 'No market offer'; const cashChange = line.revenue + line.fundPayout - line.costs - line.fundCost; return <div className="outcome-row" key={player.id}><strong>{player.name}</strong><span>{priceOutcome}</span><span>{units(line.contractUnits + line.marketUnits)} sold{line.contractUnits ? ` (${units(line.contractUnits)} by contract)` : ''}{line.contractShortfall ? ` · ${units(line.contractShortfall)} short` : ''}</span><span>{units(line.spoilage)} unsold</span><span className={cashChange < 0 ? 'negative cash-change' : 'positive cash-change'}><strong>{signedMoney(cashChange)} cash</strong>{line.fundCost > 0 && <small>Cover {money(line.fundCost)} paid · {money(line.fundPayout)} received</small>}</span></div> })}</div>
     <details className="detail-panel"><summary>See demand charts and full round audit</summary>{resolution.markets.length ? <div className="market-charts">{resolution.markets.map((market) => <MarketChart key={market.mode} market={market} />)}</div> : <p className="empty-resolution">No open-market chart is available this round.</p>}<AuditTable game={game} /></details>
     <button className="primary advance" onClick={onNext}>{game.round === ROUND2_CONFIG.rounds ? 'Open group debrief' : 'Start next round'}</button>
   </section>
@@ -187,7 +210,7 @@ function Resolution({ game, onNext }: { game: GameState; onNext: () => void }) {
 
 function CrisisPanel({ game }: { game: GameState }) {
   const impact = game.resolution!.crisisImpact!
-  return <section className="crisis-panel"><strong>Impact: {impact.headline}</strong>{impact.playerImpacts.length > 0 && <div>{impact.playerImpacts.filter((entry) => entry.growingCropsLost || entry.openMarketBlocked).map((entry) => { const player = game.players.find((item) => item.id === entry.playerId)!; return <span key={entry.playerId}>{player.name}: {entry.growingCropsLost ? `${units(entry.growingCropsLost)} growing crop lost` : ''}{entry.growingCropsLost && entry.openMarketBlocked ? ' · ' : ''}{entry.openMarketBlocked ? `${units(entry.openMarketBlocked)} open-market crop blocked` : ''}</span> })}</div>}</section>
+  return <section className="crisis-panel"><strong>{impact.headline}</strong></section>
 }
 
 function MarketChart({ market }: { market: MarketSnapshot }) {
@@ -204,12 +227,13 @@ function SupplyBar({ supply, sold }: { supply: Record<Tier, number>; sold: Recor
 }
 
 function AuditTable({ game }: { game: GameState }) {
-  return <div className="audit"><h3>Round audit</h3><div className="table-wrap"><table><thead><tr><th>Farmer</th><th>Contract</th><th>Local</th><th>Tourist</th><th>Spoilage</th><th>Revenue</th><th>Farm cost</th><th>Cash</th></tr></thead><tbody>{game.players.map((player) => { const line = game.resolution!.lines.find((entry) => entry.playerId === player.id)!; return <tr key={player.id}><td>{player.name}</td><td>{units(line.contractUnits)}{line.contractShortfall ? ` · ${units(line.contractShortfall)} short` : ''}</td><td>{units(line.localUnits)}</td><td>{units(line.touristUnits)}</td><td>{units(line.spoilage)}</td><td>{money(line.revenue)}</td><td>{money(line.costs)}</td><td>{money(player.cash)}</td></tr> })}</tbody></table></div></div>
+  return <div className="audit"><h3>Round audit</h3><div className="table-wrap"><table><thead><tr><th>Farmer</th><th>Contract</th><th>Local</th><th>Tourist</th><th>Spoilage</th><th>Revenue</th><th>Farm cost</th><th>Cover cost</th><th>Cover payout</th><th>Cash</th></tr></thead><tbody>{game.players.map((player) => { const line = game.resolution!.lines.find((entry) => entry.playerId === player.id)!; return <tr key={player.id}><td>{player.name}</td><td>{units(line.contractUnits)}{line.contractShortfall ? ` · ${units(line.contractShortfall)} short` : ''}</td><td>{units(line.localUnits)}</td><td>{units(line.touristUnits)}</td><td>{units(line.spoilage)}</td><td>{money(line.revenue)}</td><td>{money(line.costs)}</td><td>{money(line.fundCost)}</td><td>{money(line.fundPayout)}</td><td>{money(player.cash)}</td></tr> })}</tbody></table></div></div>
 }
 
 function Debrief({ game }: { game: GameState }) {
   const total = (key: 'affordableLocalSales' | 'touristSales' | 'totalSpoilage' | 'contractsFulfilled') => game.players.reduce((sum, player) => sum + player.metrics[key], 0)
-  return <section className="debrief"><p className="eyebrow">Five-round outcome</p><h2 id="screen-heading" tabIndex={-1}>Group debrief</h2><div className="metric-grid"><div><strong>{units(total('affordableLocalSales'))}</strong><span>Affordable Local sales</span></div><div><strong>{units(total('touristSales'))}</strong><span>Tourist sales</span></div><div><strong>{units(total('totalSpoilage'))}</strong><span>Spoilage</span></div><div><strong>{total('contractsFulfilled')}</strong><span>Contracts fulfilled</span></div></div><div className="table-wrap"><table><thead><tr><th>Farmer</th><th>Public goal</th><th>Outcome</th><th>Progress</th></tr></thead><tbody>{game.players.map((player) => <tr key={player.id}><td>{player.name}</td><td>{roleInstruction(player.role)}</td><td>{rolePassed(player) ? 'Met condition' : 'Not met'}</td><td>{roleProgress(player)}</td></tr>)}</tbody></table></div><p className="discussion">Discuss: Which price choices were exposed by demand? Did the co-op’s shared price help or constrain its members? Was the $6 organic farm cost worth the delayed output?</p></section>
+  const shocks = Object.entries(game.shocksByRound).filter((entry): entry is [string, NonNullable<typeof entry[1]>] => entry[1] !== null)
+  return <section className="debrief"><p className="eyebrow">Five-round outcome</p><h2 id="screen-heading" tabIndex={-1}>Group debrief</h2><p className="shock-recap">Shocks faced: {shocks.map(([round, shock]) => `Round ${round} ${title(shock)}`).join(' · ')}</p><div className="metric-grid"><div><strong>{units(total('affordableLocalSales'))}</strong><span>Affordable Local sales</span></div><div><strong>{units(total('touristSales'))}</strong><span>Tourist sales</span></div><div><strong>{units(total('totalSpoilage'))}</strong><span>Spoilage</span></div><div><strong>{total('contractsFulfilled')}</strong><span>Contracts fulfilled</span></div></div><div className="table-wrap"><table><thead><tr><th>Farmer</th><th>Public goal</th><th>Outcome</th><th>Progress</th></tr></thead><tbody>{game.players.map((player) => <tr key={player.id}><td>{player.name}</td><td>{roleInstruction(player.role)}</td><td>{rolePassed(player) ? 'Met condition' : 'Not met'}</td><td>{roleProgress(player)}</td></tr>)}</tbody></table></div><p className="discussion">Discuss: Which warning shaped your decision? Which shock hurt your farm most? Did shock cover change your choices or only the outcome?</p></section>
 }
 
 export default App

@@ -40,6 +40,7 @@ export interface TurnPlan {
   joinCoop: boolean
   startConversion: boolean
   contractQuantity: number | null
+  shockFund: boolean
 }
 
 export interface PlayerMetrics {
@@ -82,6 +83,8 @@ export interface MarketSnapshot {
 
 export interface ResolutionLine {
   playerId: string
+  harvestMode: Mode | null
+  saleInventoryUnits: number
   contractUnits: number
   contractShortfall: number
   localUnits: number
@@ -92,6 +95,8 @@ export interface ResolutionLine {
   spoilage: number
   revenue: number
   costs: number
+  fundCost: number
+  fundPayout: number
 }
 
 export interface CrisisPlayerImpact {
@@ -126,7 +131,7 @@ export interface GameState {
   votePlayerIds: string[]
   votes: Record<string, Tier>
   demandDeck: DemandCard[]
-  shockRound: number
-  shock: ShockType
+  shocksByRound: Record<number, ShockType | null>
+  riskSignals: Record<number, ShockType | null>
   resolution: Resolution | null
 }
